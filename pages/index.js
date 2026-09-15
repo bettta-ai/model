@@ -34,6 +34,7 @@ const STORAGE_KEY = 'scoutFormData';
 const TOTAL_STEPS = 6;
 const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
 const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+const SELF_TIMER_SECONDS = 10;
 
 // Read once at module scope, with the full literal name, so Next.js can inline
 // the value at build time. Empty or non-https means the button never renders.
@@ -69,7 +70,7 @@ const STEP_TITLES = [
 const STEP_SUBTITLES = [
   'These details go in your package, not to us',
   'Six shots, taken exactly like this',
-  'Add each shot to its slot',
+  'One pose at a time — the camera is optional',
   'Physical attributes',
   'Tell us about yourself',
   'Download your package, then send it out yourself'
@@ -82,8 +83,10 @@ export default function Home() {
   // localStorage, and nothing about them leaves this browser.
   const [photos, setPhotos] = useState({});
   const [mounted, setMounted] = useState(false);
-  const [cameraSlot, setCameraSlot] = useState(null);
+  // The guided shoot walks the six shots one screen at a time.
+  const [poseIndex, setPoseIndex] = useState(0);
   const [cameraStream, setCameraStream] = useState(null);
+  const [countdown, setCountdown] = useState(null);
   const [photoError, setPhotoError] = useState('');
   // Browsers differ on what they can decode — Chrome and Firefox cannot show
   // HEIC, which iPhones still produce. The file is fine and goes into the ZIP
@@ -91,8 +94,11 @@ export default function Home() {
   const [previewFailed, setPreviewFailed] = useState({});
   const [downloadError, setDownloadError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [tipDismissed, setTipDismissed] = useState(false);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const timerRef = useRef(null);
+  const streamRef = useRef(null);
   const photosRef = useRef(photos);
 
   photosRef.current = photos;
@@ -127,17 +133,23 @@ export default function Home() {
     []
   );
 
-  useEffect(() => {
-    return () => {
-      if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
-    };
-  }, [cameraStream]);
+  // Keep refs alongside the state so cleanup can always reach the live stream
+  // and the running timer, whatever re-render order React chooses.
+  streamRef.current = cameraStream;
+
+  useEffect(
+    () => () => {
+      if (streamRef.current) streamRef.current.getTracks().forEach((track) => track.stop());
+      if (timerRef.current) clearInterval(timerRef.current);
+    },
+    []
+  );
 
   useEffect(() => {
-    if (cameraSlot && cameraStream && videoRef.current) {
+    if (cameraStream && videoRef.current) {
       videoRef.current.srcObject = cameraStream;
     }
-  }, [cameraSlot, cameraStream]);
+  }, [cameraStream]);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -188,45 +200,101 @@ export default function Home() {
     });
   };
 
-  const startCamera = async (slotId) => {
+  const releaseCamera = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setCountdown(null);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setCameraStream(null);
+  }, []);
+
+  const startCamera = async () => {
+    setPhotoError('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
+        video: { facingMode: 'user', width: { ideal: 1080 }, height: { ideal: 1440 } },
         audio: false
       });
       setCameraStream(stream);
-      setCameraSlot(slotId);
-      setPhotoError('');
     } catch (err) {
-      setPhotoError('Camera access was denied. Please check your browser permissions.');
+      // Denied, unavailable, or no camera at all — the upload and skip routes
+      // below mean this is never a dead end.
+      setPhotoError('The camera is not available. You can upload a photo instead, or skip this shot.');
     }
   };
 
-  const stopCamera = () => {
-    if (cameraStream) {
-      cameraStream.getTracks().forEach((track) => track.stop());
-      setCameraStream(null);
-    }
-    setCameraSlot(null);
+  const capturePhoto = useCallback(
+    (slotId) => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || !video.videoWidth) return;
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        (blob) => {
+          if (blob) setSlotPhoto(slotId, new File([blob], `${slotId}.jpg`, { type: 'image/jpeg' }));
+          releaseCamera();
+        },
+        'image/jpeg',
+        0.92
+      );
+    },
+    [releaseCamera, setSlotPhoto]
+  );
+
+  // Ten seconds is enough to walk back into frame for the full-body shots.
+  const startTimer = (slotId) => {
+    if (timerRef.current) return;
+    let remaining = SELF_TIMER_SECONDS;
+    setCountdown(remaining);
+    timerRef.current = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+        setCountdown(null);
+        capturePhoto(slotId);
+      } else {
+        setCountdown(remaining);
+      }
+    }, 1000);
   };
 
-  const capturePhoto = () => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const slotId = cameraSlot;
-    if (!video || !canvas || !slotId) return;
+  const cancelTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setCountdown(null);
+  };
 
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-    canvas.toBlob(
-      (blob) => {
-        if (blob) setSlotPhoto(slotId, new File([blob], `${slotId}.jpg`, { type: 'image/jpeg' }));
-        stopCamera();
-      },
-      'image/jpeg',
-      0.92
-    );
+  const retake = (slotId) => {
+    removeSlotPhoto(slotId);
+    setPhotoError('');
+    startCamera();
+  };
+
+  // Used by "Use this" and by "Skip" alike: move to the next pose, or out of
+  // the shoot entirely once the last one is done.
+  const leavePose = (delta) => {
+    releaseCamera();
+    setPhotoError('');
+    const next = poseIndex + delta;
+    if (next < 0) {
+      setStep(2);
+      setPoseIndex(0);
+    } else if (next >= SHOTS.length) {
+      setStep(4);
+    } else {
+      setPoseIndex(next);
+    }
   };
 
   const handleDownloadZip = async () => {
@@ -385,102 +453,148 @@ export default function Home() {
           </div>
         )}
 
-        {/* Step 3: The six slots */}
-        {step === 3 && (
-          <div className={styles.step}>
-            {cameraSlot ? (
-              <div className={styles.cameraContainer}>
-                <p className={styles.slotName}>
-                  {SHOTS.find((shot) => shot.id === cameraSlot)?.name}
-                </p>
-                <video ref={videoRef} autoPlay playsInline muted className={styles.cameraVideo} />
-                <canvas ref={canvasRef} style={{ display: 'none' }} />
-                <div className={styles.cameraButtons}>
-                  <button type="button" onClick={capturePhoto} className={styles.btnCapture}>
-                    📸 Capture Photo
-                  </button>
-                  <button type="button" onClick={stopCamera} className={styles.btnCancel}>
-                    ✕ Close Camera
-                  </button>
+        {/* Step 3: the guided shoot — one pose per screen */}
+        {step === 3 && (() => {
+          const shot = SHOTS[poseIndex];
+          const photo = photos[shot.id];
+          const timerRunning = countdown !== null;
+
+          return (
+            <div className={styles.step}>
+              <p className={styles.shotProgress}>
+                Shot {poseIndex + 1} of {SHOTS.length} · {shot.name}
+              </p>
+              {/* Off-screen scratch surface the capture draws the video into. */}
+              <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+              <div className={styles.poseLayout}>
+                <figure className={styles.poseExample}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={shot.image} alt={`Example: ${shot.name}`} />
+                  <figcaption>Example</figcaption>
+                </figure>
+
+                <div className={styles.poseStage}>
+                  {photo ? (
+                    <div className={styles.poseShot}>
+                      {previewFailed[shot.id] ? (
+                        <span className={styles.noPreview}>Captured<br />(no preview)</span>
+                      ) : (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={photo.url}
+                          alt={`Your ${shot.name} photo`}
+                          onError={() => markPreviewFailed(shot.id)}
+                        />
+                      )}
+                    </div>
+                  ) : cameraStream ? (
+                    <div className={styles.poseShot}>
+                      <video ref={videoRef} autoPlay playsInline muted className={styles.poseVideo} />
+                      {/* The pose, faint, over the live picture — line yourself
+                          up with it before shooting. */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={shot.outline || shot.image}
+                        alt=""
+                        aria-hidden="true"
+                        className={styles.poseOverlay}
+                      />
+                      {timerRunning && <span className={styles.countdown}>{countdown}</span>}
+                    </div>
+                  ) : (
+                    <div className={styles.poseIdle}>
+                      <p>{shot.instruction}</p>
+                      <button type="button" className={styles.btnCapture} onClick={startCamera}>
+                        📷 Open camera
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
-            ) : (
-              <>
-                <p className={styles.slotCount}>
-                  {filledCount} of {SHOTS.length} added
-                </p>
-                {photoError && <p className={styles.fieldError}>{photoError}</p>}
 
-                <div className={styles.slotList}>
-                  {SHOTS.map((shot, index) => {
-                    const photo = photos[shot.id];
-                    const inputId = `file-${shot.id}`;
-                    return (
-                      <div key={shot.id} className={styles.slot}>
-                        <div className={styles.slotThumb}>
-                          {photo && previewFailed[shot.id] ? (
-                            <span className={styles.noPreview}>Added<br />(no preview)</span>
-                          ) : (
-                            /* eslint-disable-next-line @next/next/no-img-element */
-                            <img
-                              src={photo ? photo.url : shot.image}
-                              alt={photo ? `Your ${shot.name} photo` : `Example: ${shot.name}`}
-                              className={photo ? '' : styles.slotEmpty}
-                              onError={photo ? () => markPreviewFailed(shot.id) : undefined}
-                            />
-                          )}
-                        </div>
-                        <div className={styles.slotBody}>
-                          <span className={styles.guideNumber}>
-                            {String(index + 1).padStart(2, '0')}
-                          </span>
-                          <strong>{shot.name}</strong>
-                          <span className={styles.guideInstruction}>{shot.instruction}</span>
-                          <div className={styles.slotActions}>
-                            <input
-                              type="file"
-                              id={inputId}
-                              accept="image/*"
-                              style={{ display: 'none' }}
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (file) setSlotPhoto(shot.id, file);
-                                e.target.value = '';
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className={styles.slotBtn}
-                              onClick={() => document.getElementById(inputId).click()}
-                            >
-                              {photo ? 'Replace' : 'Choose file'}
-                            </button>
-                            <button
-                              type="button"
-                              className={styles.slotBtn}
-                              onClick={() => startCamera(shot.id)}
-                            >
-                              📷 Camera
-                            </button>
-                            {photo && (
-                              <button
-                                type="button"
-                                className={styles.slotBtnRemove}
-                                onClick={() => removeSlotPhoto(shot.id)}
-                              >
-                                Remove
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-        )}
+              <p className={styles.poseInstruction}>{shot.instruction}</p>
+              {photoError && <p className={styles.fieldError}>{photoError}</p>}
+
+              <div className={styles.poseActions}>
+                {photo ? (
+                  <>
+                    <button
+                      type="button"
+                      className={styles.btnCancel}
+                      onClick={() => retake(shot.id)}
+                    >
+                      Retake
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.btnCapture}
+                      onClick={() => leavePose(1)}
+                    >
+                      Use this →
+                    </button>
+                  </>
+                ) : cameraStream ? (
+                  <>
+                    {timerRunning ? (
+                      <button type="button" className={styles.btnCancel} onClick={cancelTimer}>
+                        Cancel timer ({countdown})
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className={styles.btnCapture}
+                          onClick={() => capturePhoto(shot.id)}
+                        >
+                          📸 Capture
+                        </button>
+                        {shot.timer && (
+                          <button
+                            type="button"
+                            className={styles.btnCancel}
+                            onClick={() => startTimer(shot.id)}
+                          >
+                            ⏱ {SELF_TIMER_SECONDS}s timer
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </>
+                ) : null}
+              </div>
+
+              {/* Always available, on every screen, so the camera is never a
+                  dead end. */}
+              <div className={styles.poseEscapes}>
+                <input
+                  type="file"
+                  id="poseUpload"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      releaseCamera();
+                      setSlotPhoto(shot.id, file);
+                    }
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  className={styles.linkBtn}
+                  onClick={() => document.getElementById('poseUpload').click()}
+                >
+                  Upload a photo instead
+                </button>
+                <button type="button" className={styles.linkBtn} onClick={() => leavePose(1)}>
+                  Skip
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Step 4: Measurements */}
         {step === 4 && (
@@ -680,17 +794,27 @@ export default function Home() {
 
             {/* Optional and last on the page: never before the download, never
                 in the way of it. */}
-            {coffeeLink && (
-              <div className={styles.coffeeSection}>
-                <a
-                  href={coffeeLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={styles.btnCoffee}
-                >
-                  ☕ Buy us a coffee (CHF 1)
-                </a>
-                <p className={styles.hint}>Entirely optional. Everything above is free.</p>
+            {coffeeLink && !tipDismissed && (
+              <div className={styles.tipCard}>
+                <p className={styles.tipQuestion}>Did this help?</p>
+                <p className={styles.tipAsk}>Tip bettta CHF 1</p>
+                <div className={styles.tipActions}>
+                  <a
+                    href={coffeeLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={styles.btnTip}
+                  >
+                    Tip
+                  </a>
+                  <button
+                    type="button"
+                    className={styles.btnNoThanks}
+                    onClick={() => setTipDismissed(true)}
+                  >
+                    No thanks
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -698,11 +822,16 @@ export default function Home() {
 
         <div className={styles.buttonGroup}>
           {step > 1 && (
-            <button onClick={prevStep} className={styles.btnBack}>
+            <button
+              onClick={step === 3 ? () => leavePose(-1) : prevStep}
+              className={styles.btnBack}
+            >
               ← Back
             </button>
           )}
-          {step < TOTAL_STEPS && (
+          {/* Step 3 advances through "Use this" and "Skip", so it has no
+              generic Next of its own. */}
+          {step < TOTAL_STEPS && step !== 3 && (
             <button onClick={nextStep} className={styles.btnNext}>
               Next →
             </button>

@@ -12,7 +12,7 @@ never leave their machine.
 
 1. **Contact information** — goes into their package, not to us
 2. **How to shoot your polaroids** — the six-shot guide
-3. **Your six photos** — one slot per shot
+3. **Your six photos** — a guided shoot, one pose per screen
 4. **Measurements**
 5. **About you**
 6. **Review & download** — the ZIP, then where to send it
@@ -20,6 +20,23 @@ never leave their machine.
 Text fields auto-save to `localStorage` so a refresh does not lose progress.
 Photos are held in memory only — images are far too big for the ~5 MB browser
 quota, and persisting them there used to break auto-save entirely.
+
+## The guided shoot
+
+Step 3 walks the six shots in order, one screen each. Every screen shows the
+example image, that shot's one-line instruction, and the live camera with a
+faint outline of the pose laid over it to line yourself up.
+
+- **Capture** takes the shot; then **Retake** or **Use this →**.
+- Shots flagged `timer: true` in `content/shots.js` — the full-body ones — also
+  offer a **10-second self-timer**, with a visible countdown you can cancel.
+- **Upload a photo instead** and **Skip** are on *every* screen, so a refused
+  camera permission, a device without a camera, or a pose someone would rather
+  shoot later is never a dead end. The camera only opens when asked.
+- **← Back** steps to the previous pose; photos already taken are still there.
+
+Nothing here uploads. Captures are held as files in the tab's memory and go
+straight into the ZIP.
 
 ## What the ZIP contains
 
@@ -48,14 +65,20 @@ Two files, both plain data, no React knowledge needed:
 
 The six shots. Each entry has a `name`, a one-line `instruction`, the `file`
 name used inside the ZIP, and an `image` for the guide card. Editing this file
-changes the guide, the upload slots and the ZIP filenames together.
+changes the guide, the shoot and the ZIP filenames together.
 
-**The guide images in `public/polaroid-guide/` are placeholders** — plain grey
-figures marked PLACEHOLDER. Drop real reference photos into that folder and
-point `image` at them:
+Two images per shot, both in `public/polaroid-guide/`:
+
+- `image` — the example card shown in the guide and beside the camera.
+- `outline` — the faint shape laid over the live camera. A stroked figure on a
+  transparent background, with no text or border, so it reads over any scene.
+
+**Both sets are placeholders.** Drop real reference photos in and point `image`
+at them; keep `outline` as a plain silhouette rather than reusing the photo:
 
 ```js
-image: '/polaroid-guide/01-face-front.jpg'
+image: '/polaroid-guide/01-face-front.jpg',
+outline: '/polaroid-guide/outline-01-face-front.svg'
 ```
 
 ### `content/agencies.js`
@@ -76,11 +99,13 @@ One, and it is optional. Set it in **Vercel → Settings → Environment Variabl
 
 | Variable | What it does |
 | --- | --- |
-| `NEXT_PUBLIC_COFFEE_URL` | A Stripe Payment Link. Unset or empty → the coffee button does not render at all. |
+| `NEXT_PUBLIC_COFFEE_URL` | A Stripe Payment Link. Unset or empty → the tip card does not render at all. |
 
-The button sits at the very bottom, after the download and after the agency
-list. It never appears before the download and never blocks it. Only `https://`
-URLs are accepted; anything else is ignored and the button stays hidden.
+The tip card — *"Did this help? Tip bettta CHF 1"*, with **Tip** and **No
+thanks** — sits at the very bottom, after the download and after the agency
+list. It never appears before the download and never blocks it. **No thanks**
+dismisses it for that visit. Only `https://` URLs are accepted; anything else is
+ignored and the card stays hidden.
 
 `NEXT_PUBLIC_` values are baked into the public page, so this must be a Payment
 Link URL — never a Stripe API key.
