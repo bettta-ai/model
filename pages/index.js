@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { submitApplication } from '../lib/submitForm';
+import { AGENCIES } from '../content/agencies';
+import { SHOTS, SHOT_BASICS } from '../content/shots';
+import { downloadMeasurements, downloadPackage } from '../lib/buildPackage';
 import styles from '../styles/form.module.css';
 
 const COUNTRIES = [
@@ -29,9 +31,14 @@ const COUNTRIES = [
 ];
 
 const STORAGE_KEY = 'scoutFormData';
-const MAX_PHOTOS = 12;
+const TOTAL_STEPS = 6;
 const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
 const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+
+// Read once at module scope, with the full literal name, so Next.js can inline
+// the value at build time. Empty or non-https means the button never renders.
+const COFFEE_URL = process.env.NEXT_PUBLIC_COFFEE_URL || '';
+const coffeeLink = /^https:\/\//.test(COFFEE_URL) ? COFFEE_URL : '';
 
 const EMPTY_FORM = {
   name: '',
@@ -50,45 +57,60 @@ const EMPTY_FORM = {
   prefSMS: false
 };
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const STEP_TITLES = [
+  'Contact Information',
+  'How to shoot your polaroids',
+  'Your six photos',
+  'Measurements',
+  'About You',
+  'Review & Download'
+];
+
+const STEP_SUBTITLES = [
+  'These details go in your package, not to us',
+  'Six shots, taken exactly like this',
+  'Add each shot to its slot',
+  'Physical attributes',
+  'Tell us about yourself',
+  'Download your package, then send it out yourself'
+];
 
 export default function Home() {
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState(EMPTY_FORM);
-  // Photos are kept as File objects in memory, deliberately outside formData.
-  // They are far too large for localStorage and are uploaded straight to
-  // storage on submit.
-  const [photos, setPhotos] = useState([]);
+  // One File per shot slot, kept in memory only. Images are far too big for
+  // localStorage, and nothing about them leaves this browser.
+  const [photos, setPhotos] = useState({});
   const [mounted, setMounted] = useState(false);
-  const [showCamera, setShowCamera] = useState(false);
+  const [cameraSlot, setCameraSlot] = useState(null);
   const [cameraStream, setCameraStream] = useState(null);
-  const [fieldErrors, setFieldErrors] = useState({});
   const [photoError, setPhotoError] = useState('');
-  const [status, setStatus] = useState({ state: 'idle', message: '' });
+  // Browsers differ on what they can decode — Chrome and Firefox cannot show
+  // HEIC, which iPhones still produce. The file is fine and goes into the ZIP
+  // untouched; only the on-screen preview is unavailable.
+  const [previewFailed, setPreviewFailed] = useState({});
+  const [downloadError, setDownloadError] = useState('');
+  const [busy, setBusy] = useState(false);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const photosRef = useRef(photos);
 
   photosRef.current = photos;
 
-  // Restore the text fields from a previous visit.
   useEffect(() => {
     setMounted(true);
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
-        const parsed = JSON.parse(saved);
-        // Merge onto the defaults so an older saved shape cannot leave a
-        // controlled input with an undefined value.
-        setFormData({ ...EMPTY_FORM, ...parsed, photos: undefined });
+        setFormData({ ...EMPTY_FORM, ...JSON.parse(saved) });
       }
     } catch (error) {
       console.error('Could not restore saved form data:', error);
     }
   }, []);
 
-  // Auto-save the text fields. Photos are excluded on purpose: base64 images
-  // blow past the ~5MB localStorage quota and used to kill auto-save silently.
+  // Auto-save the text fields only. Photos are excluded on purpose: base64
+  // images overflow the ~5MB localStorage quota and kill auto-save outright.
   useEffect(() => {
     if (!mounted) return;
     try {
@@ -98,117 +120,86 @@ export default function Home() {
     }
   }, [formData, mounted]);
 
-  // Release the preview URLs when the page goes away.
   useEffect(
     () => () => {
-      photosRef.current.forEach((photo) => URL.revokeObjectURL(photo.url));
+      Object.values(photosRef.current).forEach((photo) => URL.revokeObjectURL(photo.url));
     },
     []
   );
 
   useEffect(() => {
     return () => {
-      if (cameraStream) {
-        cameraStream.getTracks().forEach((track) => track.stop());
-      }
+      if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
     };
   }, [cameraStream]);
 
+  useEffect(() => {
+    if (cameraSlot && cameraStream && videoRef.current) {
+      videoRef.current.srcObject = cameraStream;
+    }
+  }, [cameraSlot, cameraStream]);
+
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value
-    }));
-    setFieldErrors((prev) => (prev[name] ? { ...prev, [name]: undefined } : prev));
+    setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
 
-  const addPhotos = useCallback((files) => {
+  const setSlotPhoto = useCallback((slotId, file) => {
+    const type = file.type || (/\.hei[cf]$/i.test(file.name || '') ? 'image/heic' : '');
+    if (!ALLOWED_PHOTO_TYPES.includes(type)) {
+      setPhotoError('That file is not a supported image (JPEG, PNG, WebP or HEIC).');
+      return;
+    }
+    if (file.size > MAX_PHOTO_BYTES) {
+      setPhotoError(`That photo is larger than ${MAX_PHOTO_BYTES / 1024 / 1024} MB.`);
+      return;
+    }
+
     setPhotoError('');
+    setPreviewFailed((prev) => {
+      if (!prev[slotId]) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+    const typed = file.type ? file : new File([file], file.name, { type });
     setPhotos((prev) => {
-      const accepted = [];
-      let error = '';
-
-      for (const file of files) {
-        if (prev.length + accepted.length >= MAX_PHOTOS) {
-          error = `You can upload at most ${MAX_PHOTOS} photos.`;
-          break;
-        }
-        // Some phones report an empty type for HEIC; fall back to the extension.
-        const type = file.type || (/\.hei[cf]$/i.test(file.name) ? 'image/heic' : '');
-        if (!ALLOWED_PHOTO_TYPES.includes(type)) {
-          error = `${file.name} is not a supported image (JPEG, PNG, WebP or HEIC).`;
-          continue;
-        }
-        if (file.size > MAX_PHOTO_BYTES) {
-          error = `${file.name} is larger than ${MAX_PHOTO_BYTES / 1024 / 1024} MB.`;
-          continue;
-        }
-        const typed = file.type ? file : new File([file], file.name, { type });
-        accepted.push({
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          file: typed,
-          url: URL.createObjectURL(typed)
-        });
-      }
-
-      if (error) setPhotoError(error);
-      return accepted.length ? [...prev, ...accepted] : prev;
+      if (prev[slotId]) URL.revokeObjectURL(prev[slotId].url);
+      return { ...prev, [slotId]: { file: typed, url: URL.createObjectURL(typed) } };
     });
   }, []);
 
-  const handlePhotoUpload = (e) => {
-    addPhotos(Array.from(e.target.files));
-    // Let the same file be picked again after it is removed.
-    e.target.value = '';
+  const markPreviewFailed = (slotId) =>
+    setPreviewFailed((prev) => ({ ...prev, [slotId]: true }));
+
+  const removeSlotPhoto = (slotId) => {
+    setPreviewFailed((prev) => {
+      if (!prev[slotId]) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+    setPhotos((prev) => {
+      if (!prev[slotId]) return prev;
+      URL.revokeObjectURL(prev[slotId].url);
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
   };
 
-  const handleDrop = (e) => {
-    e.preventDefault();
-    addPhotos(Array.from(e.dataTransfer.files));
-  };
-
-  const startCamera = async () => {
+  const startCamera = async (slotId) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user' },
         audio: false
       });
       setCameraStream(stream);
-      setShowCamera(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
+      setCameraSlot(slotId);
+      setPhotoError('');
     } catch (err) {
       setPhotoError('Camera access was denied. Please check your browser permissions.');
     }
-  };
-
-  // Attach the stream once the <video> element has actually rendered.
-  useEffect(() => {
-    if (showCamera && cameraStream && videoRef.current) {
-      videoRef.current.srcObject = cameraStream;
-    }
-  }, [showCamera, cameraStream]);
-
-  const capturePhoto = () => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
-
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) return;
-        addPhotos([new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' })]);
-        stopCamera();
-      },
-      'image/jpeg',
-      0.92
-    );
   };
 
   const stopCamera = () => {
@@ -216,201 +207,79 @@ export default function Home() {
       cameraStream.getTracks().forEach((track) => track.stop());
       setCameraStream(null);
     }
-    setShowCamera(false);
+    setCameraSlot(null);
   };
 
-  const removePhoto = (id) => {
-    setPhotos((prev) => {
-      const target = prev.find((photo) => photo.id === id);
-      if (target) URL.revokeObjectURL(target.url);
-      return prev.filter((photo) => photo.id !== id);
-    });
+  const capturePhoto = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const slotId = cameraSlot;
+    if (!video || !canvas || !slotId) return;
+
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(
+      (blob) => {
+        if (blob) setSlotPhoto(slotId, new File([blob], `${slotId}.jpg`, { type: 'image/jpeg' }));
+        stopCamera();
+      },
+      'image/jpeg',
+      0.92
+    );
   };
 
-  const summaryText = (title) => `SCOUT - ${title}
-=====================================
-
-CONTACT INFORMATION
-Name: ${formData.name || 'N/A'}
-Email: ${formData.email || 'N/A'}
-Phone: ${formData.phone || 'N/A'}
-Country: ${formData.country || 'N/A'}
-City: ${formData.city || 'N/A'}
-Contact Preferences: ${[formData.prefEmail && 'Email', formData.prefPhone && 'Phone', formData.prefSMS && 'SMS'].filter(Boolean).join(', ') || 'None selected'}
-
-MEASUREMENTS
-Height: ${formData.height || 'N/A'}
-Measurements (Bust-Waist-Hips): ${formData.measurements || 'N/A'}
-Shoe Size: ${formData.shoesize || 'N/A'}
-Hair Color: ${formData.haircolor || 'N/A'}
-Date of Birth: ${formData.dob || 'N/A'}
-
-ABOUT
-${formData.about || 'N/A'}
-
-Generated: ${new Date().toLocaleString()}
-`;
-
-  const triggerDownload = (href, filename) => {
-    const element = document.createElement('a');
-    element.setAttribute('href', href);
-    element.setAttribute('download', filename);
-    element.style.display = 'none';
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
-  };
-
-  const downloadMeasurements = () => {
-    const blob = new Blob([summaryText('Model Portfolio Measurements')], {
-      type: 'text/plain;charset=utf-8'
-    });
-    const url = URL.createObjectURL(blob);
-    triggerDownload(url, `scout-measurements-${Date.now()}.txt`);
-    URL.revokeObjectURL(url);
-  };
-
-  const loadJsZip = () =>
-    new Promise((resolve, reject) => {
-      if (window.JSZip) return resolve(window.JSZip);
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-      script.onload = () => resolve(window.JSZip);
-      script.onerror = () => reject(new Error('Could not load the zip library.'));
-      document.head.appendChild(script);
-    });
-
-  const downloadPackage = async () => {
+  const handleDownloadZip = async () => {
+    setBusy(true);
+    setDownloadError('');
     try {
-      const JSZip = await loadJsZip();
-      const zip = new JSZip();
-      zip.file('measurements.txt', summaryText('Model Portfolio Package'));
-
-      photos.forEach((photo, index) => {
-        const extension = photo.file.name?.split('.').pop() || 'jpg';
-        zip.folder('photos').file(`photo-${index + 1}.${extension}`, photo.file);
-      });
-
-      const content = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(content);
-      triggerDownload(url, `scout-portfolio-${Date.now()}.zip`);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setStatus({ state: 'error', message: 'Could not build the zip file. Please try again.' });
-    }
-  };
-
-  const validateRequired = () => {
-    const errors = {};
-    if (!formData.name.trim()) errors.name = 'Please enter your name.';
-    if (!formData.email.trim()) errors.email = 'Please enter your email.';
-    else if (!EMAIL_RE.test(formData.email.trim())) errors.email = 'That email does not look right.';
-    if (!formData.country) errors.country = 'Please choose your country.';
-    return errors;
-  };
-
-  const handleSubmit = async () => {
-    const errors = validateRequired();
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      setStatus({ state: 'error', message: 'Some required details are missing on step 1.' });
-      setStep(1);
-      return;
-    }
-
-    setFieldErrors({});
-    setStatus({ state: 'submitting', message: 'Sending your application…' });
-
-    try {
-      await submitApplication({
-        formData,
-        photos,
-        onProgress: (done, total) =>
-          setStatus({ state: 'submitting', message: `Uploading photo ${done} of ${total}…` })
-      });
-
-      setStatus({ state: 'success', message: '' });
-      photos.forEach((photo) => URL.revokeObjectURL(photo.url));
-      setPhotos([]);
-      try {
-        localStorage.removeItem(STORAGE_KEY);
-      } catch (error) {
-        console.warn('Could not clear saved form data:', error);
-      }
+      await downloadPackage(formData, photos);
     } catch (error) {
-      if (error.fields) setFieldErrors(error.fields);
-      setStatus({ state: 'error', message: error.message });
+      setDownloadError(error.message || 'Could not build the zip file. Please try again.');
+    } finally {
+      setBusy(false);
     }
   };
 
-  const startOver = () => {
-    setFormData(EMPTY_FORM);
-    setStatus({ state: 'idle', message: '' });
-    setStep(1);
+  const handleDownloadTxt = () => {
+    setDownloadError('');
+    try {
+      downloadMeasurements(formData);
+    } catch (error) {
+      setDownloadError('Could not build the text file. Please try again.');
+    }
   };
 
-  const nextStep = () => {
-    if (step < 5) setStep(step + 1);
-  };
+  const nextStep = () => setStep((s) => Math.min(s + 1, TOTAL_STEPS));
+  const prevStep = () => setStep((s) => Math.max(s - 1, 1));
 
-  const prevStep = () => {
-    if (step > 1) setStep(step - 1);
-  };
-
-  const progressWidth = (step / 5) * 100;
-  const submitting = status.state === 'submitting';
+  const filledCount = SHOTS.filter((shot) => photos[shot.id]).length;
 
   if (!mounted) return <div className={styles.container}>Loading…</div>;
-
-  if (status.state === 'success') {
-    return (
-      <div className={styles.container}>
-        <div className={styles.card}>
-          <div className={styles.successBox}>
-            <h1>Application received</h1>
-            <p>
-              Thank you. Your details and photos have been sent to the SCOUT team. We will be in
-              touch at the contact details you provided.
-            </p>
-            <button type="button" onClick={startOver} className={styles.btnNext}>
-              Submit another application
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className={styles.container}>
       <div className={styles.card}>
         <div className={styles.progressBar}>
-          <div className={styles.progressFill} style={{ width: `${progressWidth}%` }}></div>
+          <div
+            className={styles.progressFill}
+            style={{ width: `${(step / TOTAL_STEPS) * 100}%` }}
+          ></div>
         </div>
 
         <div className={styles.header}>
-          <div className={styles.stepLabel}>Step {step} of 5</div>
-          <h1 className={styles.stepTitle}>
-            {step === 1 && 'Contact Information'}
-            {step === 2 && 'Photos'}
-            {step === 3 && 'Measurements'}
-            {step === 4 && 'About You'}
-            {step === 5 && 'Review & Submit'}
-          </h1>
-          <p className={styles.stepSubtitle}>
-            {step === 1 && 'Let us know how to reach you'}
-            {step === 2 && 'Upload your photos or use your camera'}
-            {step === 3 && 'Physical attributes'}
-            {step === 4 && 'Tell us about yourself'}
-            {step === 5 && 'Check your details, then send them to us'}
-          </p>
+          <div className={styles.stepLabel}>
+            Step {step} of {TOTAL_STEPS}
+          </div>
+          <h1 className={styles.stepTitle}>{STEP_TITLES[step - 1]}</h1>
+          <p className={styles.stepSubtitle}>{STEP_SUBTITLES[step - 1]}</p>
         </div>
 
         {/* Step 1: Contact */}
         {step === 1 && (
           <div className={styles.step}>
             <div className={styles.formGroup}>
-              <label htmlFor="name">Name *</label>
+              <label htmlFor="name">Name</label>
               <input
                 type="text"
                 id="name"
@@ -418,13 +287,10 @@ Generated: ${new Date().toLocaleString()}
                 placeholder="Your full name"
                 value={formData.name}
                 onChange={handleInputChange}
-                aria-invalid={Boolean(fieldErrors.name)}
-                required
               />
-              {fieldErrors.name && <p className={styles.fieldError}>{fieldErrors.name}</p>}
             </div>
             <div className={styles.formGroup}>
-              <label htmlFor="email">Email *</label>
+              <label htmlFor="email">Email</label>
               <input
                 type="email"
                 id="email"
@@ -432,27 +298,21 @@ Generated: ${new Date().toLocaleString()}
                 placeholder="your@email.com"
                 value={formData.email}
                 onChange={handleInputChange}
-                aria-invalid={Boolean(fieldErrors.email)}
-                required
               />
-              {fieldErrors.email && <p className={styles.fieldError}>{fieldErrors.email}</p>}
             </div>
             <div className={styles.formGroup}>
-              <label htmlFor="country">Country *</label>
+              <label htmlFor="country">Country</label>
               <select
                 id="country"
                 name="country"
                 value={formData.country}
                 onChange={handleInputChange}
-                aria-invalid={Boolean(fieldErrors.country)}
-                required
               >
                 <option value="">Select country</option>
                 {COUNTRIES.map((country) => (
                   <option key={country} value={country}>{country}</option>
                 ))}
               </select>
-              {fieldErrors.country && <p className={styles.fieldError}>{fieldErrors.country}</p>}
             </div>
             <div className={styles.formGroup}>
               <label htmlFor="city">City</label>
@@ -479,80 +339,60 @@ Generated: ${new Date().toLocaleString()}
             <div className={styles.formGroup}>
               <label>Contact Preference</label>
               <div className={styles.checkboxGroup}>
-                <div className={styles.checkboxItem}>
-                  <input
-                    type="checkbox"
-                    id="prefEmail"
-                    name="prefEmail"
-                    checked={formData.prefEmail}
-                    onChange={handleInputChange}
-                  />
-                  <label htmlFor="prefEmail">Email</label>
-                </div>
-                <div className={styles.checkboxItem}>
-                  <input
-                    type="checkbox"
-                    id="prefPhone"
-                    name="prefPhone"
-                    checked={formData.prefPhone}
-                    onChange={handleInputChange}
-                  />
-                  <label htmlFor="prefPhone">Phone</label>
-                </div>
-                <div className={styles.checkboxItem}>
-                  <input
-                    type="checkbox"
-                    id="prefSMS"
-                    name="prefSMS"
-                    checked={formData.prefSMS}
-                    onChange={handleInputChange}
-                  />
-                  <label htmlFor="prefSMS">SMS</label>
-                </div>
+                {[
+                  ['prefEmail', 'Email'],
+                  ['prefPhone', 'Phone'],
+                  ['prefSMS', 'SMS']
+                ].map(([key, label]) => (
+                  <div key={key} className={styles.checkboxItem}>
+                    <input
+                      type="checkbox"
+                      id={key}
+                      name={key}
+                      checked={formData[key]}
+                      onChange={handleInputChange}
+                    />
+                    <label htmlFor={key}>{label}</label>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         )}
 
-        {/* Step 2: Photos */}
+        {/* Step 2: Polaroid guide */}
         {step === 2 && (
           <div className={styles.step}>
-            {!showCamera ? (
-              <div
-                className={styles.uploadArea}
-                onDrop={handleDrop}
-                onDragOver={(e) => e.preventDefault()}
-              >
-                <p>📸 Drag photos here or click to browse</p>
-                <input
-                  type="file"
-                  id="photoInput"
-                  multiple
-                  accept="image/*"
-                  onChange={handlePhotoUpload}
-                  style={{ display: 'none' }}
-                />
-                <button
-                  type="button"
-                  onClick={() => document.getElementById('photoInput').click()}
-                  className={styles.uploadBtn}
-                >
-                  Choose Photos
-                </button>
-                <button
-                  type="button"
-                  onClick={startCamera}
-                  className={styles.uploadBtn}
-                  style={{ marginTop: '12px' }}
-                >
-                  📷 Use Camera
-                </button>
-                <p className={styles.hint}>
-                  Up to {MAX_PHOTOS} photos, {MAX_PHOTO_BYTES / 1024 / 1024} MB each.
-                </p>
-              </div>
-            ) : (
+            <ul className={styles.basics}>
+              {SHOT_BASICS.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+
+            <div className={styles.guideGrid}>
+              {SHOTS.map((shot, index) => (
+                <figure key={shot.id} className={styles.guideCard}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={shot.image} alt={`Example: ${shot.name}`} />
+                  <figcaption>
+                    <span className={styles.guideNumber}>{String(index + 1).padStart(2, '0')}</span>
+                    <strong>{shot.name}</strong>
+                    <span className={styles.guideInstruction}>{shot.instruction}</span>
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Step 3: The six slots */}
+        {step === 3 && (
+          <div className={styles.step}>
+            {cameraSlot ? (
               <div className={styles.cameraContainer}>
+                <p className={styles.slotName}>
+                  {SHOTS.find((shot) => shot.id === cameraSlot)?.name}
+                </p>
                 <video ref={videoRef} autoPlay playsInline muted className={styles.cameraVideo} />
                 <canvas ref={canvasRef} style={{ display: 'none' }} />
                 <div className={styles.cameraButtons}>
@@ -564,33 +404,86 @@ Generated: ${new Date().toLocaleString()}
                   </button>
                 </div>
               </div>
-            )}
+            ) : (
+              <>
+                <p className={styles.slotCount}>
+                  {filledCount} of {SHOTS.length} added
+                </p>
+                {photoError && <p className={styles.fieldError}>{photoError}</p>}
 
-            {photoError && <p className={styles.fieldError}>{photoError}</p>}
-
-            {photos.length > 0 && (
-              <div className={styles.photoGrid}>
-                {photos.map((photo, idx) => (
-                  <div key={photo.id} className={styles.photoItem}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={photo.url} alt={`Photo ${idx + 1}`} />
-                    <button
-                      type="button"
-                      className={styles.photoRemove}
-                      onClick={() => removePhoto(photo.id)}
-                      aria-label={`Remove photo ${idx + 1}`}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
+                <div className={styles.slotList}>
+                  {SHOTS.map((shot, index) => {
+                    const photo = photos[shot.id];
+                    const inputId = `file-${shot.id}`;
+                    return (
+                      <div key={shot.id} className={styles.slot}>
+                        <div className={styles.slotThumb}>
+                          {photo && previewFailed[shot.id] ? (
+                            <span className={styles.noPreview}>Added<br />(no preview)</span>
+                          ) : (
+                            /* eslint-disable-next-line @next/next/no-img-element */
+                            <img
+                              src={photo ? photo.url : shot.image}
+                              alt={photo ? `Your ${shot.name} photo` : `Example: ${shot.name}`}
+                              className={photo ? '' : styles.slotEmpty}
+                              onError={photo ? () => markPreviewFailed(shot.id) : undefined}
+                            />
+                          )}
+                        </div>
+                        <div className={styles.slotBody}>
+                          <span className={styles.guideNumber}>
+                            {String(index + 1).padStart(2, '0')}
+                          </span>
+                          <strong>{shot.name}</strong>
+                          <span className={styles.guideInstruction}>{shot.instruction}</span>
+                          <div className={styles.slotActions}>
+                            <input
+                              type="file"
+                              id={inputId}
+                              accept="image/*"
+                              style={{ display: 'none' }}
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) setSlotPhoto(shot.id, file);
+                                e.target.value = '';
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className={styles.slotBtn}
+                              onClick={() => document.getElementById(inputId).click()}
+                            >
+                              {photo ? 'Replace' : 'Choose file'}
+                            </button>
+                            <button
+                              type="button"
+                              className={styles.slotBtn}
+                              onClick={() => startCamera(shot.id)}
+                            >
+                              📷 Camera
+                            </button>
+                            {photo && (
+                              <button
+                                type="button"
+                                className={styles.slotBtnRemove}
+                                onClick={() => removeSlotPhoto(shot.id)}
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </div>
         )}
 
-        {/* Step 3: Measurements */}
-        {step === 3 && (
+        {/* Step 4: Measurements */}
+        {step === 4 && (
           <div className={styles.step}>
             <div className={styles.formGroup}>
               <label htmlFor="height">Height</label>
@@ -651,15 +544,13 @@ Generated: ${new Date().toLocaleString()}
                 name="dob"
                 value={formData.dob}
                 onChange={handleInputChange}
-                aria-invalid={Boolean(fieldErrors.dob)}
               />
-              {fieldErrors.dob && <p className={styles.fieldError}>{fieldErrors.dob}</p>}
             </div>
           </div>
         )}
 
-        {/* Step 4: About */}
-        {step === 4 && (
+        {/* Step 5: About */}
+        {step === 5 && (
           <div className={styles.step}>
             <div className={styles.formGroup}>
               <label htmlFor="about">About You</label>
@@ -675,119 +566,143 @@ Generated: ${new Date().toLocaleString()}
           </div>
         )}
 
-        {/* Step 5: Review & Submit */}
-        {step === 5 && (
+        {/* Step 6: Review & Download */}
+        {step === 6 && (
           <div className={styles.step}>
             <div className={styles.reviewSection}>
               <h3>Contact Information</h3>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Name:</span>
-                <span>{formData.name || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Email:</span>
-                <span>{formData.email || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Phone:</span>
-                <span>{formData.phone || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Country:</span>
-                <span>{formData.country || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>City:</span>
-                <span>{formData.city || '-'}</span>
-              </div>
+              {[
+                ['Name', formData.name],
+                ['Email', formData.email],
+                ['Phone', formData.phone],
+                ['Country', formData.country],
+                ['City', formData.city]
+              ].map(([label, value]) => (
+                <div key={label} className={styles.reviewItem}>
+                  <span className={styles.reviewLabel}>{label}:</span>
+                  <span>{value || '-'}</span>
+                </div>
+              ))}
             </div>
 
             <div className={styles.reviewSection}>
               <h3>Measurements</h3>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Height:</span>
-                <span>{formData.height || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Measurements:</span>
-                <span>{formData.measurements || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Shoe Size:</span>
-                <span>{formData.shoesize || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Hair Color:</span>
-                <span>{formData.haircolor || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>DOB:</span>
-                <span>{formData.dob || '-'}</span>
-              </div>
+              {[
+                ['Height', formData.height],
+                ['Measurements', formData.measurements],
+                ['Shoe Size', formData.shoesize],
+                ['Hair Color', formData.haircolor],
+                ['DOB', formData.dob]
+              ].map(([label, value]) => (
+                <div key={label} className={styles.reviewItem}>
+                  <span className={styles.reviewLabel}>{label}:</span>
+                  <span>{value || '-'}</span>
+                </div>
+              ))}
             </div>
 
-            {photos.length > 0 && (
-              <div className={styles.reviewSection}>
-                <h3>Photos ({photos.length})</h3>
-                <div className={styles.photoGrid}>
-                  {photos.map((photo, idx) => (
-                    /* eslint-disable-next-line @next/next/no-img-element */
-                    <img key={photo.id} src={photo.url} alt={`Review ${idx + 1}`} />
-                  ))}
-                </div>
+            <div className={styles.reviewSection}>
+              <h3>
+                Photos ({filledCount} of {SHOTS.length})
+              </h3>
+              <div className={styles.thumbGrid}>
+                {SHOTS.map((shot, index) => (
+                  <div key={shot.id} className={styles.thumb} title={shot.name}>
+                    {photos[shot.id] && !previewFailed[shot.id] ? (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img
+                        src={photos[shot.id].url}
+                        alt={shot.name}
+                        onError={() => markPreviewFailed(shot.id)}
+                      />
+                    ) : (
+                      <span
+                        className={
+                          photos[shot.id] ? styles.thumbNoPreview : styles.thumbMissing
+                        }
+                      >
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
-            )}
+              {SHOTS.some((shot) => photos[shot.id] && previewFailed[shot.id]) && (
+                <p className={styles.hint}>
+                  Some photos cannot be previewed in this browser (usually iPhone HEIC files).
+                  They are still included in your ZIP exactly as you added them.
+                </p>
+              )}
+              {filledCount < SHOTS.length && (
+                <p className={styles.hint}>
+                  {SHOTS.length - filledCount} shot
+                  {SHOTS.length - filledCount === 1 ? ' is' : 's are'} still missing. You can
+                  download anyway, but agencies expect all six.
+                </p>
+              )}
+            </div>
 
             <div className={styles.reviewSection}>
               <h3>About</h3>
-              <p>{formData.about || '-'}</p>
+              <p className={styles.aboutText}>{formData.about || '-'}</p>
             </div>
-
-            {/* Honeypot: hidden from people, tempting to bots. */}
-            <div className={styles.honeypot} aria-hidden="true">
-              <label htmlFor="website">Website</label>
-              <input
-                type="text"
-                id="website"
-                name="website"
-                tabIndex={-1}
-                autoComplete="off"
-                value={formData.website || ''}
-                onChange={handleInputChange}
-              />
-            </div>
-
-            {status.state === 'error' && <p className={styles.formError}>{status.message}</p>}
-            {submitting && <p className={styles.formStatus}>{status.message}</p>}
-
-            <button
-              type="button"
-              onClick={handleSubmit}
-              className={styles.btnSubmit}
-              disabled={submitting}
-            >
-              {submitting ? 'Sending…' : 'Submit application'}
-            </button>
 
             <div className={styles.downloadSection}>
-              <p className={styles.hint}>Optional: keep a copy for yourself.</p>
-              <button onClick={downloadMeasurements} className={styles.btnDownloadTxt}>
-                📄 Download Measurements (.txt)
+              <h3>Download your package</h3>
+              <p className={styles.hint}>
+                The ZIP holds your six shots, named so agencies can read them at a glance, plus
+                your measurements. It is built here in your browser — nothing is sent to us.
+              </p>
+              {downloadError && <p className={styles.fieldError}>{downloadError}</p>}
+              <button onClick={handleDownloadZip} className={styles.btnDownloadZip} disabled={busy}>
+                {busy ? 'Building…' : '📦 Download Full Package (.zip)'}
               </button>
-              <button onClick={downloadPackage} className={styles.btnDownloadZip}>
-                📦 Download Full Package (.zip)
+              <button onClick={handleDownloadTxt} className={styles.btnDownloadTxt}>
+                📄 Download Measurements only (.txt)
               </button>
             </div>
+
+            <div className={styles.sendSection}>
+              <h3>Where to send it</h3>
+              <p className={styles.warningLine}>Real agencies never ask you to pay to apply.</p>
+              <ul className={styles.agencyList}>
+                {AGENCIES.map((agency) => (
+                  <li key={agency.url}>
+                    <a href={agency.url} target="_blank" rel="noopener noreferrer">
+                      {agency.name}
+                    </a>
+                    <span className={styles.agencyPlace}>{agency.place}</span>
+                    {agency.note && <span className={styles.agencyNote}>{agency.note}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Optional and last on the page: never before the download, never
+                in the way of it. */}
+            {coffeeLink && (
+              <div className={styles.coffeeSection}>
+                <a
+                  href={coffeeLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={styles.btnCoffee}
+                >
+                  ☕ Buy us a coffee (CHF 1)
+                </a>
+                <p className={styles.hint}>Entirely optional. Everything above is free.</p>
+              </div>
+            )}
           </div>
         )}
 
         <div className={styles.buttonGroup}>
           {step > 1 && (
-            <button onClick={prevStep} className={styles.btnBack} disabled={submitting}>
+            <button onClick={prevStep} className={styles.btnBack}>
               ← Back
             </button>
           )}
-          {step < 5 && (
+          {step < TOTAL_STEPS && (
             <button onClick={nextStep} className={styles.btnNext}>
               Next →
             </button>

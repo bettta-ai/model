@@ -1,101 +1,101 @@
-# SCOUT — Model Portfolio Form
+# SCOUT — Model Portfolio Builder
 
-A 5-step portfolio application form. Submissions are saved to Supabase
-(Postgres for the details, private Storage for the photos) and the team gets an
-email when one arrives.
+A six-step tool that helps someone build a proper agency submission package and
+then send it out **themselves**.
 
-## How a submission travels
+**Nothing is submitted to us.** There is no backend, no database, no API route
+and no upload. The page runs entirely in the visitor's browser, builds a ZIP on
+their own device, and points them at the agencies. Their photos and details
+never leave their machine.
 
-1. The applicant fills in steps 1–4. Text fields auto-save to `localStorage` so
-   a refresh does not lose their work. **Photos are deliberately not saved
-   there** — images are far too big for the ~5 MB browser quota.
-2. On **Submit**, the browser asks `/api/upload-url` for one-time signed upload
-   URLs and sends each photo **straight to Supabase Storage**. Photos never pass
-   through the serverless function, which has a 4.5 MB request cap that a couple
-   of phone photos would blow straight past.
-3. The browser then posts the text fields plus the uploaded photo paths to
-   `/api/submit`, which validates everything, writes one row to the
-   `submissions` table, and emails a notification.
-4. The team reads submissions at `/admin`.
+## The six steps
 
-## Setup
+1. **Contact information** — goes into their package, not to us
+2. **How to shoot your polaroids** — the six-shot guide
+3. **Your six photos** — one slot per shot
+4. **Measurements**
+5. **About you**
+6. **Review & download** — the ZIP, then where to send it
 
-### 1. Supabase
+Text fields auto-save to `localStorage` so a refresh does not lose progress.
+Photos are held in memory only — images are far too big for the ~5 MB browser
+quota, and persisting them there used to break auto-save entirely.
 
-Create a project at [supabase.com](https://supabase.com), then open
-**SQL Editor → New query**, paste the contents of [`supabase/schema.sql`](supabase/schema.sql)
-and run it. That creates the `submissions` table with row-level security on, and
-a **private** `submissions` storage bucket.
+## What the ZIP contains
 
-### 2. Resend (for the notification email)
+```
+01-face-front.jpg
+02-face-side.jpg
+03-face-smile.jpg
+04-full-body-front.jpg
+05-full-body-side.jpg
+06-full-body-back.jpg
+measurements.txt
+```
 
-Create an account at [resend.com](https://resend.com), verify the domain you
-want to send from, and create an API key.
+Each photo keeps its own file extension. Slots left empty are simply absent —
+the download still works, with a note on the review step saying what is missing.
 
-### 3. Environment variables
+The ZIP is built with JSZip, which ships with the app rather than loading from a
+CDN: the download is the whole point of the page, so it must not depend on a
+third-party host being reachable.
 
-Set these in **Vercel → Project → Settings → Environment Variables** (and in a
-local `.env.local` for development — see [`.env.example`](.env.example)).
+## Editing the content
 
-| Variable | Required | What it is |
-| --- | --- | --- |
-| `SUPABASE_URL` | yes | Project URL, from Supabase → Settings → API |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | **Service role** key, same page. Mark it Sensitive |
-| `SUPABASE_STORAGE_BUCKET` | no | Defaults to `submissions` |
-| `ADMIN_TOKEN` | yes | Long random string gating `/admin`. Generate with `openssl rand -hex 32` |
-| `NOTIFY_EMAIL` | no | Where the alert goes, e.g. `hello@bettta.ai` |
-| `RESEND_API_KEY` | no | Resend API key. Mark it Sensitive |
-| `NOTIFY_FROM` | no | Sender address on a domain verified with Resend |
-| `APP_BASE_URL` | no | e.g. `https://model.bettta.ai`, used for the link in the email |
+Two files, both plain data, no React knowledge needed:
 
-**Never commit any of these values.** This repository is public. The service
-role key bypasses row-level security — if it leaks, every submission is exposed.
-It is only ever read server-side, and is never included in the browser bundle.
+### `content/shots.js`
 
-If `NOTIFY_EMAIL` or `RESEND_API_KEY` is missing, submissions still save
-normally — the notification is simply skipped and a warning is logged.
+The six shots. Each entry has a `name`, a one-line `instruction`, the `file`
+name used inside the ZIP, and an `image` for the guide card. Editing this file
+changes the guide, the upload slots and the ZIP filenames together.
 
-## Reading submissions
+**The guide images in `public/polaroid-guide/` are placeholders** — plain grey
+figures marked PLACEHOLDER. Drop real reference photos into that folder and
+point `image` at them:
 
-Go to `https://model.bettta.ai/admin?token=YOUR_ADMIN_TOKEN`. The token is then
-kept in an httpOnly cookie for a week, so you only need the full link once — the
-one in each notification email already includes it.
+```js
+image: '/polaroid-guide/01-face-front.jpg'
+```
 
-- `/admin` — every submission, newest first
-- `/admin/<id>` — one applicant's full details and photos
+### `content/agencies.js`
 
-Photos live in a private bucket and are served through short-lived signed URLs,
-so they are not publicly reachable.
+The "Where to send it" list: `name`, `place`, `url`, and an optional one-line
+`note`, rendered in the order given.
 
-## What the notification email contains
+⚠️ **It currently holds a starter list that nobody has verified.** Open every
+link, confirm each agency is real and open to submissions, then replace the list
+with the agencies you actually want to send people to.
 
-Only the applicant's **name**, their **country**, and a **link to the entry**.
-Photos, phone number, date of birth and everything else stay in Supabase behind
-the admin login — email is not a safe place to fan out personal data.
+The line *"Real agencies never ask you to pay to apply."* is fixed in the page
+itself, not in this file, so an edit to the list cannot accidentally remove it.
+
+## Environment variables
+
+One, and it is optional. Set it in **Vercel → Settings → Environment Variables**.
+
+| Variable | What it does |
+| --- | --- |
+| `NEXT_PUBLIC_COFFEE_URL` | A Stripe Payment Link. Unset or empty → the coffee button does not render at all. |
+
+The button sits at the very bottom, after the download and after the agency
+list. It never appears before the download and never blocks it. Only `https://`
+URLs are accepted; anything else is ignored and the button stays hidden.
+
+`NEXT_PUBLIC_` values are baked into the public page, so this must be a Payment
+Link URL — never a Stripe API key.
+
+## Analytics
+
+Vercel Web Analytics, via `@vercel/analytics`. It sets **no cookies** and stores
+no identifier in the browser, so there is nothing to consent to. Enable it under
+your project's Analytics tab in Vercel; locally the script 404s, which is normal.
 
 ## Local development
 
 ```bash
 npm install
-cp .env.example .env.local   # then fill in your values
-npm run dev
-```
-
-Open http://localhost:3000.
-
-Note that `.env.local` is gitignored and must stay that way.
-
-## Build
-
-```bash
+npm run dev     # http://localhost:3000
 npm run build
-npm start
 npm run lint
 ```
-
-## Data notes
-
-Submissions contain personal data (contact details, date of birth, photos of
-identifiable people). Keep the service role key and admin token secret, and
-delete entries you no longer need — a row can be removed from the Supabase table
-editor, and its photos from the `submissions` bucket.
