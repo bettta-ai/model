@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400" width="300" height="400" role="img" aria-label="Full body, side placeholder">
+  <rect width="300" height="400" fill="#f2f2f2"/>
+  <rect x="8" y="8" width="284" height="384" fill="none" stroke="#e0e0e0" stroke-width="2" stroke-dasharray="8 8" rx="6"/>
+  <circle cx="158" cy="72" r="30" fill="#c9c9c9"/>
+  <path d="M136 112 h34 l12 96 h-10 l-4 116 h-18 l-2 -104 l-8 104 h-16 l4 -116 h-10 z" fill="#c9c9c9"/>
+  <text x="150" y="366" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="600" fill="#9a9a9a">Full body, side</text>
+  <text x="150" y="386" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" letter-spacing="1.2" fill="#bdbdbd">PLACEHOLDER</text>
+</svg>

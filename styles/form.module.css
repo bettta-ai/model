@@ -11,7 +11,7 @@
   background: white;
   border-radius: 12px;
   padding: 32px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .progressBar {
@@ -60,6 +60,8 @@
   margin-bottom: 32px;
 }
 
+/* --- Form fields --- */
+
 .formGroup {
   margin-bottom: 20px;
 }
@@ -90,7 +92,7 @@
 .formGroup textarea:focus {
   outline: none;
   border-color: #000;
-  box-shadow: 0 0 0 2px rgba(0,0,0,0.05);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.05);
 }
 
 .formGroup textarea {
@@ -110,7 +112,7 @@
   gap: 8px;
 }
 
-.checkboxItem input[type="checkbox"] {
+.checkboxItem input[type='checkbox'] {
   width: 18px;
   height: 18px;
   cursor: pointer;
@@ -123,46 +125,242 @@
   font-size: 14px;
 }
 
-.uploadArea {
-  border: 2px dashed #ddd;
-  border-radius: 8px;
-  padding: 40px 20px;
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.2s;
-  margin: 20px 0;
+.fieldError {
+  color: #c0271c;
+  font-size: 13px;
+  margin: 12px 0 0 0;
 }
 
-.uploadArea:hover {
-  border-color: #000;
-  background: #f9f9f9;
-}
-
-.uploadArea p {
+.hint {
   color: #999;
-  font-size: 14px;
-  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 12px 0 0 0;
 }
 
-.uploadBtn {
-  background: #000;
-  color: white;
-  border: none;
-  padding: 10px 20px;
-  border-radius: 6px;
+/* --- Polaroid guide (step 2) --- */
+
+.basics {
+  margin: 0 0 24px 0;
+  padding: 20px 20px 20px 36px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #444;
+}
+
+.basics li + li {
+  margin-top: 8px;
+}
+
+.guideGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 20px;
+}
+
+.guideCard {
+  margin: 0;
+  background: #fff;
+  border: 1px solid #eee;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.guideCard img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  background: #f2f2f2;
+}
+
+.guideCard figcaption {
+  display: block;
+  padding: 14px 16px 16px;
+}
+
+.guideNumber {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: #bbb;
+  margin-bottom: 4px;
+}
+
+.guideCard figcaption strong {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.guideInstruction {
+  display: block;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #777;
+}
+
+/* --- Guided shoot (step 3) --- */
+
+.shotProgress {
   font-size: 13px;
   font-weight: 600;
+  color: #999;
+  margin: 0 0 16px 0;
+  text-align: center;
+}
+
+.poseLayout {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.poseExample {
+  margin: 0;
+}
+
+.poseExample img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #f2f2f2;
+  border: 1px solid #eee;
+}
+
+.poseExample figcaption {
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #bbb;
+  text-align: center;
+}
+
+.poseStage {
+  min-width: 0;
+}
+
+.poseShot {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #111;
+}
+
+.poseShot img,
+.poseVideo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* The pose guide, faint, floating over the live picture. Never interactive. */
+.poseOverlay {
+  position: absolute;
+  inset: 0;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.countdown {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 72px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.poseIdle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  padding: 20px;
+  box-sizing: border-box;
+  text-align: center;
+  border: 2px dashed #ddd;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.poseIdle p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #777;
+}
+
+.poseInstruction {
+  margin: 20px 0 0 0;
+  font-size: 15px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.poseActions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.poseActions:empty {
+  display: none;
+}
+
+.poseEscapes {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.linkBtn {
+  background: none;
+  border: none;
+  padding: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #777;
+  text-decoration: underline;
   cursor: pointer;
-  transition: all 0.2s;
 }
 
-.uploadBtn:hover {
-  background: #333;
+.linkBtn:hover {
+  color: #000;
 }
 
-.uploadBtn + .uploadBtn {
-  margin-left: 12px;
+@media (max-width: 520px) {
+  .poseLayout {
+    grid-template-columns: 84px 1fr;
+  }
+
+  .countdown {
+    font-size: 56px;
+  }
 }
+
+/* --- Camera --- */
 
 .cameraContainer {
   border: 2px solid #ddd;
@@ -186,10 +384,9 @@
   background: #f5f5f5;
 }
 
-.btnCapture {
+.btnCapture,
+.btnCancel {
   flex: 1;
-  background: #000;
-  color: white;
   border: none;
   padding: 12px 20px;
   border-radius: 6px;
@@ -197,6 +394,11 @@
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.btnCapture {
+  background: #000;
+  color: white;
 }
 
 .btnCapture:hover {
@@ -204,69 +406,15 @@
 }
 
 .btnCancel {
-  flex: 1;
   background: #f0f0f0;
   color: #000;
-  border: none;
-  padding: 12px 20px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
 }
 
 .btnCancel:hover {
   background: #e0e0e0;
 }
 
-.photoGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
-  gap: 12px;
-  margin-top: 20px;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.photoItem {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #f0f0f0;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-}
-
-.photoItem img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.photoRemove {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  background: rgba(0,0,0,0.7);
-  color: white;
-  border: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  font-size: 14px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  line-height: 1;
-}
-
-.photoRemove:hover {
-  background: rgba(0,0,0,0.9);
-}
+/* --- Review (step 6) --- */
 
 .reviewSection {
   background: #f9f9f9;
@@ -288,6 +436,7 @@
 .reviewItem {
   display: flex;
   justify-content: space-between;
+  gap: 16px;
   padding: 10px 0;
   font-size: 14px;
   border-bottom: 1px solid #eee;
@@ -300,21 +449,83 @@
 .reviewLabel {
   color: #999;
   font-weight: 600;
+  flex-shrink: 0;
 }
+
+.aboutText {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+/* Small, tidy contact-sheet thumbnails: one fixed-size tile per shot, in
+   order, so the six read as a set rather than a ragged gallery. */
+.thumbGrid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+}
+
+.thumb {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #ececec;
+  border: 1px solid #e4e4e4;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumbMissing {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #bbb;
+}
+
+@media (max-width: 520px) {
+  .thumbGrid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+/* --- Download --- */
 
 .downloadSection {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   margin-top: 40px;
   padding-top: 24px;
   border-top: 2px solid #eee;
 }
 
-.btnDownloadTxt,
-.btnDownloadZip {
+.downloadSection h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.downloadSection .hint {
+  margin: 0 0 4px 0;
+}
+
+.btnDownloadZip,
+.btnDownloadTxt {
   padding: 16px 24px;
-  border: none;
   border-radius: 8px;
   font-size: 14px;
   font-weight: 600;
@@ -323,23 +534,161 @@
   text-align: center;
 }
 
-.btnDownloadTxt {
-  background: #000;
-  color: white;
-}
-
-.btnDownloadTxt:hover {
-  background: #333;
-}
-
 .btnDownloadZip {
   background: #000;
   color: white;
+  border: none;
 }
 
 .btnDownloadZip:hover {
   background: #333;
 }
+
+.btnDownloadZip:disabled {
+  background: #999;
+  cursor: progress;
+}
+
+.btnDownloadTxt {
+  background: white;
+  color: #000;
+  border: 1px solid #ddd;
+}
+
+.btnDownloadTxt:hover {
+  background: #f5f5f5;
+}
+
+/* --- Where to send it --- */
+
+.sendSection {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid #eee;
+}
+
+.sendSection h3 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.warningLine {
+  margin: 0 0 20px 0;
+  padding: 12px 16px;
+  background: #fff8e6;
+  border: 1px solid #f0e0b0;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #6b5400;
+}
+
+.agencyList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.agencyList li {
+  padding: 14px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 14px;
+}
+
+.agencyList li:last-child {
+  border-bottom: none;
+}
+
+.agencyList a {
+  color: #000;
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px solid #ddd;
+}
+
+.agencyList a:hover {
+  border-bottom-color: #000;
+}
+
+.agencyPlace {
+  display: inline-block;
+  margin-left: 10px;
+  font-size: 12px;
+  color: #999;
+}
+
+.agencyNote {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  color: #888;
+}
+
+/* --- Optional tip card, always last --- */
+
+.tipCard {
+  margin-top: 32px;
+  padding: 24px;
+  border: 1px solid #eee;
+  border-radius: 10px;
+  background: #fafafa;
+  text-align: center;
+}
+
+.tipQuestion {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.tipAsk {
+  margin: 6px 0 20px 0;
+  font-size: 14px;
+  color: #777;
+}
+
+.tipActions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.btnTip,
+.btnNoThanks {
+  padding: 10px 24px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+
+.btnTip {
+  background: #000;
+  color: #fff;
+  border: 1px solid #000;
+}
+
+.btnTip:hover {
+  background: #333;
+}
+
+.btnNoThanks {
+  background: #fff;
+  color: #777;
+  border: 1px solid #ddd;
+}
+
+.btnNoThanks:hover {
+  color: #000;
+  border-color: #999;
+}
+
+/* --- Navigation --- */
 
 .buttonGroup {
   display: flex;
@@ -351,8 +700,7 @@
 }
 
 .btnBack,
-.btnNext,
-.btnSubmit {
+.btnNext {
   padding: 14px 28px;
   border: none;
   border-radius: 8px;
@@ -363,14 +711,12 @@
   flex: 1;
 }
 
-.btnNext,
-.btnSubmit {
+.btnNext {
   background: #000;
   color: white;
 }
 
-.btnNext:hover,
-.btnSubmit:hover {
+.btnNext:hover {
   background: #333;
 }
 
@@ -381,4 +727,54 @@
 
 .btnBack:hover {
   background: #e0e0e0;
+}
+
+@media (max-width: 520px) {
+  .container {
+    padding: 12px;
+  }
+
+  .card {
+    padding: 20px;
+  }
+
+  .slot {
+    flex-direction: column;
+  }
+
+  .slotThumb {
+    flex-basis: auto;
+    width: 96px;
+  }
+}
+
+/* A photo the browser cannot decode (HEIC, most often) — it is still in the
+   package, so this must not read as an error. */
+.noPreview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: #888;
+}
+
+.slotThumb {
+  position: relative;
+}
+
+.thumbNoPreview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #666;
+  background: #dcdcdc;
 }

@@ -1,6 +1,7 @@
-'use client';
-
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { AGENCIES } from '../content/agencies';
+import { SHOTS, SHOT_BASICS } from '../content/shots';
+import { downloadMeasurements, downloadPackage } from '../lib/buildPackage';
 import styles from '../styles/form.module.css';
 
 const COUNTRIES = [
@@ -29,263 +30,324 @@ const COUNTRIES = [
   'Uzbekistan', 'Vanuatu', 'Vatican City', 'Venezuela', 'Vietnam', 'Yemen', 'Zambia', 'Zimbabwe'
 ];
 
+const STORAGE_KEY = 'scoutFormData';
+const TOTAL_STEPS = 6;
+const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
+const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+const SELF_TIMER_SECONDS = 10;
+
+// Read once at module scope, with the full literal name, so Next.js can inline
+// the value at build time. Empty or non-https means the button never renders.
+const COFFEE_URL = process.env.NEXT_PUBLIC_COFFEE_URL || '';
+const coffeeLink = /^https:\/\//.test(COFFEE_URL) ? COFFEE_URL : '';
+
+const EMPTY_FORM = {
+  name: '',
+  email: '',
+  country: '',
+  city: '',
+  phone: '',
+  height: '',
+  measurements: '',
+  shoesize: '',
+  haircolor: '',
+  dob: '',
+  about: '',
+  prefEmail: false,
+  prefPhone: false,
+  prefSMS: false
+};
+
+const STEP_TITLES = [
+  'Contact Information',
+  'How to shoot your polaroids',
+  'Your six photos',
+  'Measurements',
+  'About You',
+  'Review & Download'
+];
+
+const STEP_SUBTITLES = [
+  'These details go in your package, not to us',
+  'Six shots, taken exactly like this',
+  'One pose at a time — the camera is optional',
+  'Physical attributes',
+  'Tell us about yourself',
+  'Download your package, then send it out yourself'
+];
+
 export default function Home() {
   const [step, setStep] = useState(1);
-  const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    country: '',
-    city: '',
-    phone: '',
-    height: '',
-    measurements: '',
-    shoesize: '',
-    haircolor: '',
-    dob: '',
-    about: '',
-    prefEmail: false,
-    prefPhone: false,
-    prefSMS: false,
-    photos: []
-  });
+  const [formData, setFormData] = useState(EMPTY_FORM);
+  // One File per shot slot, kept in memory only. Images are far too big for
+  // localStorage, and nothing about them leaves this browser.
+  const [photos, setPhotos] = useState({});
   const [mounted, setMounted] = useState(false);
-  const [showCamera, setShowCamera] = useState(false);
+  // The guided shoot walks the six shots one screen at a time.
+  const [poseIndex, setPoseIndex] = useState(0);
   const [cameraStream, setCameraStream] = useState(null);
+  const [countdown, setCountdown] = useState(null);
+  const [photoError, setPhotoError] = useState('');
+  // Browsers differ on what they can decode — Chrome and Firefox cannot show
+  // HEIC, which iPhones still produce. The file is fine and goes into the ZIP
+  // untouched; only the on-screen preview is unavailable.
+  const [previewFailed, setPreviewFailed] = useState({});
+  const [downloadError, setDownloadError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [tipDismissed, setTipDismissed] = useState(false);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const timerRef = useRef(null);
+  const streamRef = useRef(null);
+  const photosRef = useRef(photos);
 
-  // Load from localStorage on mount
+  photosRef.current = photos;
+
   useEffect(() => {
     setMounted(true);
-    const saved = localStorage.getItem('scoutFormData');
-    if (saved) {
-      try {
-        setFormData(JSON.parse(saved));
-      } catch (e) {
-        console.error('Error loading form data:', e);
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        setFormData({ ...EMPTY_FORM, ...JSON.parse(saved) });
       }
+    } catch (error) {
+      console.error('Could not restore saved form data:', error);
     }
   }, []);
 
-  // Save to localStorage whenever formData changes
+  // Auto-save the text fields only. Photos are excluded on purpose: base64
+  // images overflow the ~5MB localStorage quota and kill auto-save outright.
   useEffect(() => {
-    if (mounted) {
-      localStorage.setItem('scoutFormData', JSON.stringify(formData));
+    if (!mounted) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(formData));
+    } catch (error) {
+      console.warn('Could not auto-save form data:', error);
     }
   }, [formData, mounted]);
 
-  // Cleanup camera stream
+  useEffect(
+    () => () => {
+      Object.values(photosRef.current).forEach((photo) => URL.revokeObjectURL(photo.url));
+    },
+    []
+  );
+
+  // Keep refs alongside the state so cleanup can always reach the live stream
+  // and the running timer, whatever re-render order React chooses.
+  streamRef.current = cameraStream;
+
+  useEffect(
+    () => () => {
+      if (streamRef.current) streamRef.current.getTracks().forEach((track) => track.stop());
+      if (timerRef.current) clearInterval(timerRef.current);
+    },
+    []
+  );
+
   useEffect(() => {
-    return () => {
-      if (cameraStream) {
-        cameraStream.getTracks().forEach(track => track.stop());
-      }
-    };
+    if (cameraStream && videoRef.current) {
+      videoRef.current.srcObject = cameraStream;
+    }
   }, [cameraStream]);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value
-    }));
+    setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
 
-  const handlePhotoUpload = (e) => {
-    const files = Array.from(e.target.files);
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setFormData(prev => ({
-          ...prev,
-          photos: [...prev.photos, event.target.result]
-        }));
-      };
-      reader.readAsDataURL(file);
+  const setSlotPhoto = useCallback((slotId, file) => {
+    const type = file.type || (/\.hei[cf]$/i.test(file.name || '') ? 'image/heic' : '');
+    if (!ALLOWED_PHOTO_TYPES.includes(type)) {
+      setPhotoError('That file is not a supported image (JPEG, PNG, WebP or HEIC).');
+      return;
+    }
+    if (file.size > MAX_PHOTO_BYTES) {
+      setPhotoError(`That photo is larger than ${MAX_PHOTO_BYTES / 1024 / 1024} MB.`);
+      return;
+    }
+
+    setPhotoError('');
+    setPreviewFailed((prev) => {
+      if (!prev[slotId]) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+    const typed = file.type ? file : new File([file], file.name, { type });
+    setPhotos((prev) => {
+      if (prev[slotId]) URL.revokeObjectURL(prev[slotId].url);
+      return { ...prev, [slotId]: { file: typed, url: URL.createObjectURL(typed) } };
+    });
+  }, []);
+
+  const markPreviewFailed = (slotId) =>
+    setPreviewFailed((prev) => ({ ...prev, [slotId]: true }));
+
+  const removeSlotPhoto = (slotId) => {
+    setPreviewFailed((prev) => {
+      if (!prev[slotId]) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+    setPhotos((prev) => {
+      if (!prev[slotId]) return prev;
+      URL.revokeObjectURL(prev[slotId].url);
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
     });
   };
 
+  const releaseCamera = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setCountdown(null);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setCameraStream(null);
+  }, []);
+
   const startCamera = async () => {
+    setPhotoError('');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'user' },
-        audio: false 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1080 }, height: { ideal: 1440 } },
+        audio: false
       });
       setCameraStream(stream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+    } catch (err) {
+      // Denied, unavailable, or no camera at all — the upload and skip routes
+      // below mean this is never a dead end.
+      setPhotoError('The camera is not available. You can upload a photo instead, or skip this shot.');
+    }
+  };
+
+  const capturePhoto = useCallback(
+    (slotId) => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || !video.videoWidth) return;
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        (blob) => {
+          if (blob) setSlotPhoto(slotId, new File([blob], `${slotId}.jpg`, { type: 'image/jpeg' }));
+          releaseCamera();
+        },
+        'image/jpeg',
+        0.92
+      );
+    },
+    [releaseCamera, setSlotPhoto]
+  );
+
+  // Ten seconds is enough to walk back into frame for the full-body shots.
+  const startTimer = (slotId) => {
+    if (timerRef.current) return;
+    let remaining = SELF_TIMER_SECONDS;
+    setCountdown(remaining);
+    timerRef.current = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+        setCountdown(null);
+        capturePhoto(slotId);
+      } else {
+        setCountdown(remaining);
       }
-      setShowCamera(true);
-    } catch (err) {
-      alert('Camera access denied. Please check permissions.');
+    }, 1000);
+  };
+
+  const cancelTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setCountdown(null);
+  };
+
+  const retake = (slotId) => {
+    removeSlotPhoto(slotId);
+    setPhotoError('');
+    startCamera();
+  };
+
+  // Used by "Use this" and by "Skip" alike: move to the next pose, or out of
+  // the shoot entirely once the last one is done.
+  const leavePose = (delta) => {
+    releaseCamera();
+    setPhotoError('');
+    const next = poseIndex + delta;
+    if (next < 0) {
+      setStep(2);
+      setPoseIndex(0);
+    } else if (next >= SHOTS.length) {
+      setStep(4);
+    } else {
+      setPoseIndex(next);
     }
   };
 
-  const capturePhoto = () => {
-    if (videoRef.current && canvasRef.current) {
-      const context = canvasRef.current.getContext('2d');
-      context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
-      const dataUrl = canvasRef.current.toDataURL('image/jpeg');
-      setFormData(prev => ({
-        ...prev,
-        photos: [...prev.photos, dataUrl]
-      }));
-      stopCamera();
-    }
-  };
-
-  const stopCamera = () => {
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
-    setShowCamera(false);
-  };
-
-  const removePhoto = (index) => {
-    setFormData(prev => ({
-      ...prev,
-      photos: prev.photos.filter((_, i) => i !== index)
-    }));
-  };
-
-  const downloadMeasurements = () => {
-    const text = `SCOUT - Model Portfolio Measurements
-=====================================
-
-CONTACT INFORMATION
-Name: ${formData.name || 'N/A'}
-Email: ${formData.email || 'N/A'}
-Phone: ${formData.phone || 'N/A'}
-Country: ${formData.country || 'N/A'}
-City: ${formData.city || 'N/A'}
-Contact Preferences: ${[formData.prefEmail && 'Email', formData.prefPhone && 'Phone', formData.prefSMS && 'SMS'].filter(Boolean).join(', ') || 'None selected'}
-
-MEASUREMENTS
-Height: ${formData.height || 'N/A'}
-Measurements (Bust-Waist-Hips): ${formData.measurements || 'N/A'}
-Shoe Size: ${formData.shoesize || 'N/A'}
-Hair Color: ${formData.haircolor || 'N/A'}
-Date of Birth: ${formData.dob || 'N/A'}
-
-ABOUT
-${formData.about || 'N/A'}
-
-Generated: ${new Date().toLocaleString()}
-`;
-
-    const element = document.createElement('a');
-    element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
-    element.setAttribute('download', `scout-measurements-${Date.now()}.txt`);
-    element.style.display = 'none';
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
-  };
-
-  const downloadPackage = async () => {
+  const handleDownloadZip = async () => {
+    setBusy(true);
+    setDownloadError('');
     try {
-      // Load jszip from CDN
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-      document.head.appendChild(script);
-      
-      script.onload = async () => {
-        const JSZip = window.JSZip;
-        const zip = new JSZip();
-
-        // Add measurements file
-        const measurements = `SCOUT - Model Portfolio Package
-===================================
-
-CONTACT INFORMATION
-Name: ${formData.name || 'N/A'}
-Email: ${formData.email || 'N/A'}
-Phone: ${formData.phone || 'N/A'}
-Country: ${formData.country || 'N/A'}
-City: ${formData.city || 'N/A'}
-Contact Preferences: ${[formData.prefEmail && 'Email', formData.prefPhone && 'Phone', formData.prefSMS && 'SMS'].filter(Boolean).join(', ') || 'None selected'}
-
-MEASUREMENTS
-Height: ${formData.height || 'N/A'}
-Measurements (Bust-Waist-Hips): ${formData.measurements || 'N/A'}
-Shoe Size: ${formData.shoesize || 'N/A'}
-Hair Color: ${formData.haircolor || 'N/A'}
-Date of Birth: ${formData.dob || 'N/A'}
-
-ABOUT
-${formData.about || 'N/A'}
-
-Generated: ${new Date().toLocaleString()}
-`;
-
-        zip.file('measurements.txt', measurements);
-
-        // Add photos
-        formData.photos.forEach((photo, idx) => {
-          const base64Data = photo.split(',')[1];
-          zip.folder('photos').file(`photo-${idx + 1}.jpg`, base64Data, { base64: true });
-        });
-
-        // Generate and download zip
-        const content = await zip.generateAsync({ type: 'blob' });
-        const url = window.URL.createObjectURL(content);
-        const element = document.createElement('a');
-        element.setAttribute('href', url);
-        element.setAttribute('download', `scout-portfolio-${Date.now()}.zip`);
-        element.style.display = 'none';
-        document.body.appendChild(element);
-        element.click();
-        document.body.removeChild(element);
-        window.URL.revokeObjectURL(url);
-      };
-    } catch (err) {
-      alert('Error creating zip file. Please try again.');
+      await downloadPackage(formData, photos);
+    } catch (error) {
+      setDownloadError(error.message || 'Could not build the zip file. Please try again.');
+    } finally {
+      setBusy(false);
     }
   };
 
-  const nextStep = () => {
-    if (step < 5) setStep(step + 1);
+  const handleDownloadTxt = () => {
+    setDownloadError('');
+    try {
+      downloadMeasurements(formData);
+    } catch (error) {
+      setDownloadError('Could not build the text file. Please try again.');
+    }
   };
 
-  const prevStep = () => {
-    if (step > 1) setStep(step - 1);
-  };
+  const nextStep = () => setStep((s) => Math.min(s + 1, TOTAL_STEPS));
+  const prevStep = () => setStep((s) => Math.max(s - 1, 1));
 
-  const progressWidth = (step / 5) * 100;
+  const filledCount = SHOTS.filter((shot) => photos[shot.id]).length;
 
-  if (!mounted) return <div>Loading...</div>;
+  if (!mounted) return <div className={styles.container}>Loading…</div>;
 
   return (
     <div className={styles.container}>
       <div className={styles.card}>
         <div className={styles.progressBar}>
-          <div className={styles.progressFill} style={{ width: `${progressWidth}%` }}></div>
+          <div
+            className={styles.progressFill}
+            style={{ width: `${(step / TOTAL_STEPS) * 100}%` }}
+          ></div>
         </div>
 
         <div className={styles.header}>
-          <div className={styles.stepLabel}>Step {step} of 5</div>
-          <h1 className={styles.stepTitle}>
-            {step === 1 && 'Contact Information'}
-            {step === 2 && 'Photos'}
-            {step === 3 && 'Measurements'}
-            {step === 4 && 'About You'}
-            {step === 5 && 'Review & Download'}
-          </h1>
-          <p className={styles.stepSubtitle}>
-            {step === 1 && 'Let us know how to reach you'}
-            {step === 2 && 'Upload your photos or use your camera'}
-            {step === 3 && 'Physical attributes'}
-            {step === 4 && 'Tell us about yourself'}
-            {step === 5 && 'Download your portfolio package'}
-          </p>
+          <div className={styles.stepLabel}>
+            Step {step} of {TOTAL_STEPS}
+          </div>
+          <h1 className={styles.stepTitle}>{STEP_TITLES[step - 1]}</h1>
+          <p className={styles.stepSubtitle}>{STEP_SUBTITLES[step - 1]}</p>
         </div>
 
         {/* Step 1: Contact */}
         {step === 1 && (
           <div className={styles.step}>
             <div className={styles.formGroup}>
-              <label htmlFor="name">Name *</label>
+              <label htmlFor="name">Name</label>
               <input
                 type="text"
                 id="name"
@@ -293,11 +355,10 @@ Generated: ${new Date().toLocaleString()}
                 placeholder="Your full name"
                 value={formData.name}
                 onChange={handleInputChange}
-                required
               />
             </div>
             <div className={styles.formGroup}>
-              <label htmlFor="email">Email *</label>
+              <label htmlFor="email">Email</label>
               <input
                 type="email"
                 id="email"
@@ -305,20 +366,18 @@ Generated: ${new Date().toLocaleString()}
                 placeholder="your@email.com"
                 value={formData.email}
                 onChange={handleInputChange}
-                required
               />
             </div>
             <div className={styles.formGroup}>
-              <label htmlFor="country">Country *</label>
+              <label htmlFor="country">Country</label>
               <select
                 id="country"
                 name="country"
                 value={formData.country}
                 onChange={handleInputChange}
-                required
               >
                 <option value="">Select country</option>
-                {COUNTRIES.map(country => (
+                {COUNTRIES.map((country) => (
                   <option key={country} value={country}>{country}</option>
                 ))}
               </select>
@@ -348,126 +407,197 @@ Generated: ${new Date().toLocaleString()}
             <div className={styles.formGroup}>
               <label>Contact Preference</label>
               <div className={styles.checkboxGroup}>
-                <div className={styles.checkboxItem}>
-                  <input
-                    type="checkbox"
-                    id="prefEmail"
-                    name="prefEmail"
-                    checked={formData.prefEmail}
-                    onChange={handleInputChange}
-                  />
-                  <label htmlFor="prefEmail">Email</label>
-                </div>
-                <div className={styles.checkboxItem}>
-                  <input
-                    type="checkbox"
-                    id="prefPhone"
-                    name="prefPhone"
-                    checked={formData.prefPhone}
-                    onChange={handleInputChange}
-                  />
-                  <label htmlFor="prefPhone">Phone</label>
-                </div>
-                <div className={styles.checkboxItem}>
-                  <input
-                    type="checkbox"
-                    id="prefSMS"
-                    name="prefSMS"
-                    checked={formData.prefSMS}
-                    onChange={handleInputChange}
-                  />
-                  <label htmlFor="prefSMS">SMS</label>
-                </div>
+                {[
+                  ['prefEmail', 'Email'],
+                  ['prefPhone', 'Phone'],
+                  ['prefSMS', 'SMS']
+                ].map(([key, label]) => (
+                  <div key={key} className={styles.checkboxItem}>
+                    <input
+                      type="checkbox"
+                      id={key}
+                      name={key}
+                      checked={formData[key]}
+                      onChange={handleInputChange}
+                    />
+                    <label htmlFor={key}>{label}</label>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         )}
 
-        {/* Step 2: Photos */}
+        {/* Step 2: Polaroid guide */}
         {step === 2 && (
           <div className={styles.step}>
-            {!showCamera ? (
-              <>
-                <div className={styles.uploadArea}>
-                  <p>📸 Drag photos here or click to browse</p>
-                  <input
-                    type="file"
-                    id="photoInput"
-                    multiple
-                    accept="image/*"
-                    onChange={handlePhotoUpload}
-                    style={{ display: 'none' }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => document.getElementById('photoInput').click()}
-                    className={styles.uploadBtn}
-                  >
-                    Choose Photos
-                  </button>
-                  <button
-                    type="button"
-                    onClick={startCamera}
-                    className={styles.uploadBtn}
-                    style={{ marginTop: '12px' }}
-                  >
-                    📷 Use Camera
-                  </button>
-                </div>
-              </>
-            ) : (
-              <div className={styles.cameraContainer}>
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  className={styles.cameraVideo}
-                />
-                <canvas
-                  ref={canvasRef}
-                  width={640}
-                  height={480}
-                  style={{ display: 'none' }}
-                />
-                <div className={styles.cameraButtons}>
-                  <button
-                    type="button"
-                    onClick={capturePhoto}
-                    className={styles.btnCapture}
-                  >
-                    📸 Capture Photo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={stopCamera}
-                    className={styles.btnCancel}
-                  >
-                    ✕ Close Camera
-                  </button>
-                </div>
-              </div>
-            )}
-            {formData.photos.length > 0 && (
-              <div className={styles.photoGrid}>
-                {formData.photos.map((photo, idx) => (
-                  <div key={idx} className={styles.photoItem}>
-                    <img src={photo} alt={`Photo ${idx + 1}`} />
-                    <button
-                      type="button"
-                      className={styles.photoRemove}
-                      onClick={() => removePhoto(idx)}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+            <ul className={styles.basics}>
+              {SHOT_BASICS.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+
+            <div className={styles.guideGrid}>
+              {SHOTS.map((shot, index) => (
+                <figure key={shot.id} className={styles.guideCard}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={shot.image} alt={`Example: ${shot.name}`} />
+                  <figcaption>
+                    <span className={styles.guideNumber}>{String(index + 1).padStart(2, '0')}</span>
+                    <strong>{shot.name}</strong>
+                    <span className={styles.guideInstruction}>{shot.instruction}</span>
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
           </div>
         )}
 
-        {/* Step 3: Measurements */}
-        {step === 3 && (
+        {/* Step 3: the guided shoot — one pose per screen */}
+        {step === 3 && (() => {
+          const shot = SHOTS[poseIndex];
+          const photo = photos[shot.id];
+          const timerRunning = countdown !== null;
+
+          return (
+            <div className={styles.step}>
+              <p className={styles.shotProgress}>
+                Shot {poseIndex + 1} of {SHOTS.length} · {shot.name}
+              </p>
+              {/* Off-screen scratch surface the capture draws the video into. */}
+              <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+              <div className={styles.poseLayout}>
+                <figure className={styles.poseExample}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={shot.image} alt={`Example: ${shot.name}`} />
+                  <figcaption>Example</figcaption>
+                </figure>
+
+                <div className={styles.poseStage}>
+                  {photo ? (
+                    <div className={styles.poseShot}>
+                      {previewFailed[shot.id] ? (
+                        <span className={styles.noPreview}>Captured<br />(no preview)</span>
+                      ) : (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={photo.url}
+                          alt={`Your ${shot.name} photo`}
+                          onError={() => markPreviewFailed(shot.id)}
+                        />
+                      )}
+                    </div>
+                  ) : cameraStream ? (
+                    <div className={styles.poseShot}>
+                      <video ref={videoRef} autoPlay playsInline muted className={styles.poseVideo} />
+                      {/* The pose, faint, over the live picture — line yourself
+                          up with it before shooting. */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={shot.outline || shot.image}
+                        alt=""
+                        aria-hidden="true"
+                        className={styles.poseOverlay}
+                      />
+                      {timerRunning && <span className={styles.countdown}>{countdown}</span>}
+                    </div>
+                  ) : (
+                    <div className={styles.poseIdle}>
+                      <p>{shot.instruction}</p>
+                      <button type="button" className={styles.btnCapture} onClick={startCamera}>
+                        📷 Open camera
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <p className={styles.poseInstruction}>{shot.instruction}</p>
+              {photoError && <p className={styles.fieldError}>{photoError}</p>}
+
+              <div className={styles.poseActions}>
+                {photo ? (
+                  <>
+                    <button
+                      type="button"
+                      className={styles.btnCancel}
+                      onClick={() => retake(shot.id)}
+                    >
+                      Retake
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.btnCapture}
+                      onClick={() => leavePose(1)}
+                    >
+                      Use this →
+                    </button>
+                  </>
+                ) : cameraStream ? (
+                  <>
+                    {timerRunning ? (
+                      <button type="button" className={styles.btnCancel} onClick={cancelTimer}>
+                        Cancel timer ({countdown})
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className={styles.btnCapture}
+                          onClick={() => capturePhoto(shot.id)}
+                        >
+                          📸 Capture
+                        </button>
+                        {shot.timer && (
+                          <button
+                            type="button"
+                            className={styles.btnCancel}
+                            onClick={() => startTimer(shot.id)}
+                          >
+                            ⏱ {SELF_TIMER_SECONDS}s timer
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </>
+                ) : null}
+              </div>
+
+              {/* Always available, on every screen, so the camera is never a
+                  dead end. */}
+              <div className={styles.poseEscapes}>
+                <input
+                  type="file"
+                  id="poseUpload"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      releaseCamera();
+                      setSlotPhoto(shot.id, file);
+                    }
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  className={styles.linkBtn}
+                  onClick={() => document.getElementById('poseUpload').click()}
+                >
+                  Upload a photo instead
+                </button>
+                <button type="button" className={styles.linkBtn} onClick={() => leavePose(1)}>
+                  Skip
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Step 4: Measurements */}
+        {step === 4 && (
           <div className={styles.step}>
             <div className={styles.formGroup}>
               <label htmlFor="height">Height</label>
@@ -533,8 +663,8 @@ Generated: ${new Date().toLocaleString()}
           </div>
         )}
 
-        {/* Step 4: About */}
-        {step === 4 && (
+        {/* Step 5: About */}
+        {step === 5 && (
           <div className={styles.step}>
             <div className={styles.formGroup}>
               <label htmlFor="about">About You</label>
@@ -550,91 +680,158 @@ Generated: ${new Date().toLocaleString()}
           </div>
         )}
 
-        {/* Step 5: Review & Download */}
-        {step === 5 && (
+        {/* Step 6: Review & Download */}
+        {step === 6 && (
           <div className={styles.step}>
             <div className={styles.reviewSection}>
               <h3>Contact Information</h3>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Name:</span>
-                <span>{formData.name || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Email:</span>
-                <span>{formData.email || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Phone:</span>
-                <span>{formData.phone || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Country:</span>
-                <span>{formData.country || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>City:</span>
-                <span>{formData.city || '-'}</span>
-              </div>
+              {[
+                ['Name', formData.name],
+                ['Email', formData.email],
+                ['Phone', formData.phone],
+                ['Country', formData.country],
+                ['City', formData.city]
+              ].map(([label, value]) => (
+                <div key={label} className={styles.reviewItem}>
+                  <span className={styles.reviewLabel}>{label}:</span>
+                  <span>{value || '-'}</span>
+                </div>
+              ))}
             </div>
 
             <div className={styles.reviewSection}>
               <h3>Measurements</h3>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Height:</span>
-                <span>{formData.height || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Measurements:</span>
-                <span>{formData.measurements || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Shoe Size:</span>
-                <span>{formData.shoesize || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>Hair Color:</span>
-                <span>{formData.haircolor || '-'}</span>
-              </div>
-              <div className={styles.reviewItem}>
-                <span className={styles.reviewLabel}>DOB:</span>
-                <span>{formData.dob || '-'}</span>
-              </div>
+              {[
+                ['Height', formData.height],
+                ['Measurements', formData.measurements],
+                ['Shoe Size', formData.shoesize],
+                ['Hair Color', formData.haircolor],
+                ['DOB', formData.dob]
+              ].map(([label, value]) => (
+                <div key={label} className={styles.reviewItem}>
+                  <span className={styles.reviewLabel}>{label}:</span>
+                  <span>{value || '-'}</span>
+                </div>
+              ))}
             </div>
 
-            {formData.photos.length > 0 && (
-              <div className={styles.reviewSection}>
-                <h3>Photos ({formData.photos.length})</h3>
-                <div className={styles.photoGrid}>
-                  {formData.photos.map((photo, idx) => (
-                    <img key={idx} src={photo} alt={`Review ${idx + 1}`} />
-                  ))}
-                </div>
+            <div className={styles.reviewSection}>
+              <h3>
+                Photos ({filledCount} of {SHOTS.length})
+              </h3>
+              <div className={styles.thumbGrid}>
+                {SHOTS.map((shot, index) => (
+                  <div key={shot.id} className={styles.thumb} title={shot.name}>
+                    {photos[shot.id] && !previewFailed[shot.id] ? (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img
+                        src={photos[shot.id].url}
+                        alt={shot.name}
+                        onError={() => markPreviewFailed(shot.id)}
+                      />
+                    ) : (
+                      <span
+                        className={
+                          photos[shot.id] ? styles.thumbNoPreview : styles.thumbMissing
+                        }
+                      >
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
-            )}
+              {SHOTS.some((shot) => photos[shot.id] && previewFailed[shot.id]) && (
+                <p className={styles.hint}>
+                  Some photos cannot be previewed in this browser (usually iPhone HEIC files).
+                  They are still included in your ZIP exactly as you added them.
+                </p>
+              )}
+              {filledCount < SHOTS.length && (
+                <p className={styles.hint}>
+                  {SHOTS.length - filledCount} shot
+                  {SHOTS.length - filledCount === 1 ? ' is' : 's are'} still missing. You can
+                  download anyway, but agencies expect all six.
+                </p>
+              )}
+            </div>
 
             <div className={styles.reviewSection}>
               <h3>About</h3>
-              <p>{formData.about || '-'}</p>
+              <p className={styles.aboutText}>{formData.about || '-'}</p>
             </div>
 
             <div className={styles.downloadSection}>
-              <button onClick={downloadMeasurements} className={styles.btnDownloadTxt}>
-                📄 Download Measurements (.txt)
+              <h3>Download your package</h3>
+              <p className={styles.hint}>
+                The ZIP holds your six shots, named so agencies can read them at a glance, plus
+                your measurements. It is built here in your browser — nothing is sent to us.
+              </p>
+              {downloadError && <p className={styles.fieldError}>{downloadError}</p>}
+              <button onClick={handleDownloadZip} className={styles.btnDownloadZip} disabled={busy}>
+                {busy ? 'Building…' : '📦 Download Full Package (.zip)'}
               </button>
-              <button onClick={downloadPackage} className={styles.btnDownloadZip}>
-                📦 Download Full Package (.zip)
+              <button onClick={handleDownloadTxt} className={styles.btnDownloadTxt}>
+                📄 Download Measurements only (.txt)
               </button>
             </div>
+
+            <div className={styles.sendSection}>
+              <h3>Where to send it</h3>
+              <p className={styles.warningLine}>Real agencies never ask you to pay to apply.</p>
+              <ul className={styles.agencyList}>
+                {AGENCIES.map((agency) => (
+                  <li key={agency.url}>
+                    <a href={agency.url} target="_blank" rel="noopener noreferrer">
+                      {agency.name}
+                    </a>
+                    <span className={styles.agencyPlace}>{agency.place}</span>
+                    {agency.note && <span className={styles.agencyNote}>{agency.note}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Optional and last on the page: never before the download, never
+                in the way of it. */}
+            {coffeeLink && !tipDismissed && (
+              <div className={styles.tipCard}>
+                <p className={styles.tipQuestion}>Did this help?</p>
+                <p className={styles.tipAsk}>Tip bettta CHF 1</p>
+                <div className={styles.tipActions}>
+                  <a
+                    href={coffeeLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={styles.btnTip}
+                  >
+                    Tip
+                  </a>
+                  <button
+                    type="button"
+                    className={styles.btnNoThanks}
+                    onClick={() => setTipDismissed(true)}
+                  >
+                    No thanks
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
         <div className={styles.buttonGroup}>
           {step > 1 && (
-            <button onClick={prevStep} className={styles.btnBack}>
+            <button
+              onClick={step === 3 ? () => leavePose(-1) : prevStep}
+              className={styles.btnBack}
+            >
               ← Back
             </button>
           )}
-          {step < 5 && (
+          {/* Step 3 advances through "Use this" and "Skip", so it has no
+              generic Next of its own. */}
+          {step < TOTAL_STEPS && step !== 3 && (
             <button onClick={nextStep} className={styles.btnNext}>
               Next →
             </button>
